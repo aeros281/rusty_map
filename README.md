@@ -59,7 +59,25 @@ export default function transform(data) {
 }
 ```
 
-## Build & run
+## Installation
+
+### From GitHub
+
+```sh
+cargo install --git https://github.com/aeros281/rusty_map.git
+```
+
+This compiles and installs the `rusty_map` binary to `~/.cargo/bin/`.
+
+### From local source
+
+```sh
+git clone https://github.com/aeros281/rusty_map.git
+cd rusty_map
+cargo install --path .
+```
+
+### Build without installing
 
 ```sh
 cargo build --release
