@@ -8,17 +8,23 @@ QuickJS is a small, self-contained JS engine that supports ES2020 (including ES 
 Key call chain in `src/lib.rs`:
 
 ```
-Runtime::new()                    — create an isolated QuickJS runtime
-JsContext::full(&rt)              — create a context with the full JS standard library
-Module::declare(ctx, name, src)   — compile the script as an ES module
-module.eval()                     — evaluate the module, resolving the module promise
-module.namespace()                — retrieve the module's namespace object
-ns.get("default")                 — extract the default-export function
-JSON.parse(json_str)              — deserialise the input inside the JS engine
-func.call((js_input,))            — invoke the transform with the parsed value
-JSON.stringify(result)            — serialise the return value back to a string
-serde_json::from_str(&result_str) — hand the JSON string to Rust's serde_json
+Runtime::new()                        — create an isolated QuickJS runtime
+JsContext::full(&rt)                  — create a context with the full JS standard library
+Module::declare(ctx, name, src)       — compile the script as an ES module
+module.eval()                         — evaluate the module, resolving the module promise
+module.namespace()                    — retrieve the module's namespace object
+ns.get("before_transform")            — fetch export as Value (undefined if absent)
+ns.get("try_filter")                  —   "
+ns.get("try_map")                     —   "
+ns.get("after_transform")             —   "
+JSON.parse(json_str)                  — deserialise the input inside the JS engine
+ctx.eval(PIPELINE_JS)                 — compile the JS orchestrator function
+pipeline_fn.call((b, f, m, a, input)) — run the full pipeline
+JSON.stringify(final_result)          — serialise the return value back to a string
+serde_json::from_str(&result_str)     — hand the JSON string to Rust's serde_json
 ```
+
+Each of the four exports is fetched as a `Value` (returns `undefined` when the export is absent) and passed as an argument to `PIPELINE_JS`, a small inline JS function that performs the `typeof`-checks, array iteration, and sequencing entirely in JavaScript.
 
 Input round-trips through `JSON.parse` / `JSON.stringify` inside the JS context so the script receives a live JS object and returns a plain JSON-serialisable value.
 
@@ -45,9 +51,9 @@ Error sources and messages:
 
 | Need | How |
 |------|-----|
-| Pass extra context (env vars, flags) to the script | Wrap the input and extra data in a JS object; pass as a second argument to `func.call` |
-| Named export instead of default | Replace `ns.get("default")` with `ns.get("myFn")` |
-| Multiple scripts in a pipeline | Feed the `serde_json::Value` output of one `run_transform` call as input to the next |
+| Shared setup state across filter / map | Return it from `before_transform`; it arrives as `ctx` in both callbacks |
+| Transform a non-array value (object) | `try_filter` / `try_map` wrap the object in a single-element array, apply the callbacks, then unwrap back to a scalar. A filtered-out object becomes `null`. Use `after_transform` alone when no per-item logic is needed. |
+| Chain multiple scripts | Feed the `serde_json::Value` output of one `run_transform` call as input to the next |
 | TypeScript support | Pre-transpile with `swc` or `esbuild` before passing the source to `Module::declare` |
 | Async transforms | Use `rquickjs`'s `Promise` support and drive the runtime event loop with `rt.run_gc()` / `ctx.execute_pending_job()` |
 
