@@ -28,6 +28,28 @@ Each of the four exports is fetched as a `Value` (returns `undefined` when the e
 
 Input round-trips through `JSON.parse` / `JSON.stringify` inside the JS context so the script receives a live JS object and returns a plain JSON-serialisable value.
 
+## Rust bindings (`rb_*` globals)
+
+QuickJS has no built-in I/O or networking. To compensate, `register_bindings` (called once per `run_transform` invocation, before user-script evaluation) registers three native functions as globals on the JS context:
+
+| Global | Rust implementation |
+|--------|---------------------|
+| `rb_read_file(path)` | `std::fs::read_to_string` |
+| `rb_http_get(url, body?, headers?)` | `reqwest::blocking::Client::get` |
+| `rb_http_post(url, body?, headers?)` | `reqwest::blocking::Client::post` |
+
+Each function receives `Ctx<'js>` as its first Rust argument so it can convert Rust errors into proper JS `Error` objects via `ctx.throw(Exception::from_message(...))`. This lets scripts use idiomatic `try/catch`.
+
+Headers are accepted as a `Option<Object<'js>>` and forwarded to reqwest via `Object::props::<String, String>()`.
+
+HTTP calls use `reqwest::blocking`, which blocks the calling thread until a response arrives. This integrates cleanly with QuickJS's synchronous execution model.
+
+Call chain addition:
+```
+register_bindings(&ctx)              — expose rb_read_file, rb_http_get, rb_http_post as globals
+Module::declare(ctx, name, src)      — compile the user script (globals already visible)
+```
+
 ## JSON serialisation
 
 `serde_json::Value` is used on the Rust side; the JSON string is parsed and stringified by the engine's own `JSON` global so no manual type mapping is required.  
@@ -65,3 +87,4 @@ Error sources and messages:
 | `clap` (derive) | Ergonomic CLI parsing with auto-generated `--help` |
 | `serde_json` | Standard JSON in Rust; `Value` type handles schema-free data |
 | `anyhow` | Chainable error context without boilerplate |
+| `reqwest` (blocking) | Synchronous HTTP client for `rb_http_get` / `rb_http_post`; blocking feature avoids introducing an async runtime |

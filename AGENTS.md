@@ -40,6 +40,32 @@ export function after_transform(items) { return { results: items }; }
 
 See [examples/sample.js](examples/sample.js) for a working example.
 
+## Built-in JS globals (Rust bindings)
+
+These functions are available in every script without any import. They are implemented in Rust and exposed to QuickJS at startup. All errors are thrown as JS `Error` objects so scripts can `try/catch` them.
+
+| Global | Signature | Purpose |
+|--------|-----------|---------|
+| `rb_read_file` | `(path: string) → string` | Reads a file from disk; returns the full content as a string. |
+| `rb_http_get` | `(url: string, body?: string, headers?: object) → string` | Sends an HTTP GET request; returns the response body as a string. |
+| `rb_http_post` | `(url: string, body?: string, headers?: object) → string` | Sends an HTTP POST request; returns the response body as a string. |
+
+Pass headers as a plain object: `{ "Authorization": "Bearer token", "Content-Type": "application/json" }`.
+
+```js
+export function after_transform(items) {
+    // enrich each item with data from a sidecar file
+    const config = JSON.parse(rb_read_file("/etc/my-tool/config.json"));
+    // call an external API with auth
+    const raw = rb_http_post(
+        "https://api.example.com/enrich",
+        JSON.stringify({ ids: items }),
+        { "Authorization": "Bearer " + config.token, "Content-Type": "application/json" }
+    );
+    return JSON.parse(raw);
+}
+```
+
 ## Build & run
 
 ```sh

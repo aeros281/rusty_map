@@ -116,6 +116,30 @@ cargo build --release
 cat examples/sample.json | ./target/release/rusty_map examples/sample.js
 ```
 
+## Built-in JS globals
+
+These functions are available in every script without any import. They are implemented in Rust and exposed to QuickJS at startup. All errors are thrown as JS `Error` objects so scripts can `try/catch` them.
+
+| Global | Signature | Purpose |
+|--------|-----------|---------|
+| `rb_read_file` | `(path: string) → string` | Reads a file from disk; returns the full content as a string. |
+| `rb_http_get` | `(url: string, body?: string, headers?: object) → string` | Sends an HTTP GET request; returns the response body as a string. |
+| `rb_http_post` | `(url: string, body?: string, headers?: object) → string` | Sends an HTTP POST request; returns the response body as a string. |
+
+Pass headers as a plain object: `{ "Authorization": "Bearer token", "Content-Type": "application/json" }`.
+
+```js
+export function after_transform(items) {
+    const config = JSON.parse(rb_read_file("/etc/my-tool/config.json"));
+    const raw = rb_http_post(
+        "https://api.example.com/enrich",
+        JSON.stringify({ ids: items }),
+        { "Authorization": "Bearer " + config.token, "Content-Type": "application/json" }
+    );
+    return JSON.parse(raw);
+}
+```
+
 ## Dependencies
 
 | Crate | Role |
@@ -124,6 +148,7 @@ cat examples/sample.json | ./target/release/rusty_map examples/sample.js
 | [`clap`](https://github.com/clap-rs/clap) | CLI argument parsing |
 | [`serde_json`](https://github.com/serde-rs/json) | JSON parsing and serialisation |
 | [`anyhow`](https://github.com/dtolnay/anyhow) | Ergonomic error handling |
+| [`reqwest`](https://github.com/seanmonstar/reqwest) | Blocking HTTP client for `rb_http_get` / `rb_http_post` |
 
 ## Project layout
 

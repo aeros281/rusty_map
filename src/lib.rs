@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rquickjs::{Context as JsContext, Function, Module, Object, Runtime, Value};
+use rquickjs::{Context as JsContext, Ctx, Exception, Function, Module, Object, Runtime, Value};
 
 // JS orchestrator: receives each optional pipeline fn (or undefined) + the parsed input.
 // before_transform -> try_filter/try_map (per item, array only) -> after_transform.
@@ -23,6 +23,91 @@ const PIPELINE_JS: &str = r#"(function(before, filter, map, after, input) {
     return (typeof after === 'function') ? after(processed) : processed;
 })"#;
 
+fn rb_read_file<'js>(ctx: Ctx<'js>, path: String) -> rquickjs::Result<String> {
+    std::fs::read_to_string(&path).map_err(|e| {
+        ctx.throw(Exception::from_message(ctx.clone(), &e.to_string()).expect("OOM").into())
+    })
+}
+
+// headers may be a plain JS object, null, or undefined — all are safe to pass.
+fn apply_headers<'js>(
+    mut builder: reqwest::blocking::RequestBuilder,
+    headers: Value<'js>,
+) -> rquickjs::Result<reqwest::blocking::RequestBuilder> {
+    if let Some(obj) = headers.into_object() {
+        for entry in obj.props::<String, String>() {
+            let (k, v) = entry?;
+            builder = builder.header(k, v);
+        }
+    }
+    Ok(builder)
+}
+
+// rb_http_get(url, body?, headers?)
+fn rb_http_get<'js>(
+    ctx: Ctx<'js>,
+    url: String,
+    body: Option<String>,
+    headers: Value<'js>,
+) -> rquickjs::Result<String> {
+    let client = reqwest::blocking::Client::new();
+    let mut builder = apply_headers(client.get(&url), headers)?;
+    if let Some(b) = body {
+        builder = builder.body(b);
+    }
+    builder
+        .send()
+        .and_then(|r| r.text())
+        .map_err(|e| {
+            ctx.throw(Exception::from_message(ctx.clone(), &e.to_string()).expect("OOM").into())
+        })
+}
+
+// rb_http_post(url, body?, headers?)
+fn rb_http_post<'js>(
+    ctx: Ctx<'js>,
+    url: String,
+    body: Option<String>,
+    headers: Value<'js>,
+) -> rquickjs::Result<String> {
+    let client = reqwest::blocking::Client::new();
+    let mut builder = apply_headers(client.post(&url), headers)?;
+    if let Some(b) = body {
+        builder = builder.body(b);
+    }
+    builder
+        .send()
+        .and_then(|r| r.text())
+        .map_err(|e| {
+            ctx.throw(Exception::from_message(ctx.clone(), &e.to_string()).expect("OOM").into())
+        })
+}
+
+fn register_bindings<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    globals.set("rb_read_file", Function::new(ctx.clone(), rb_read_file)?)?;
+    globals.set("rb_http_get", Function::new(ctx.clone(), rb_http_get)?)?;
+    globals.set("rb_http_post", Function::new(ctx.clone(), rb_http_post)?)?;
+    Ok(())
+}
+
+fn format_js_error(ctx: &Ctx<'_>, e: rquickjs::Error) -> anyhow::Error {
+    if matches!(e, rquickjs::Error::Exception) {
+        let caught = ctx.catch();
+        if let Some(exc) = caught.as_exception() {
+            let detail = exc
+                .stack()
+                .or_else(|| exc.message())
+                .unwrap_or_else(|| "unknown exception".into());
+            return anyhow::anyhow!("Script execution failed: {}", detail);
+        }
+        if let Some(s) = caught.as_string().and_then(|js| js.to_string().ok()) {
+            return anyhow::anyhow!("Script execution failed: {}", s);
+        }
+    }
+    anyhow::anyhow!("Script execution failed: {}", e)
+}
+
 /// Run `script` (an ES module) on `json_str` using the pipeline:
 /// `before_transform` → `try_filter` / `try_map` (per item) → `after_transform`.
 /// All four exports are optional.
@@ -33,176 +118,40 @@ pub fn run_transform(json_str: &str, script: &str) -> Result<serde_json::Value> 
     let ctx = JsContext::full(&rt).context("Failed to create JS context")?;
 
     let result_str = ctx
-        .with(|ctx| -> rquickjs::Result<String> {
-            let module = Module::declare(ctx.clone(), "transform", script)?;
-            let (module, _promise) = module.eval()?;
-            let ns: Object = module.namespace()?;
+        .with(|ctx| -> Result<String> {
+            let run = || -> rquickjs::Result<String> {
+                register_bindings(&ctx)?;
 
-            let globals = ctx.globals();
-            let json_obj: Object = globals.get("JSON")?;
-            let parse: Function = json_obj.get("parse")?;
-            let stringify: Function = json_obj.get("stringify")?;
+                let module = Module::declare(ctx.clone(), "transform", script)?;
+                let (module, _promise) = module.eval()?;
+                let ns: Object = module.namespace()?;
 
-            let js_input: Value = parse.call((json_str,))?;
+                let globals = ctx.globals();
+                let json_obj: Object = globals.get("JSON")?;
+                let parse: Function = json_obj.get("parse")?;
+                let stringify: Function = json_obj.get("stringify")?;
 
-            // Fetch each export as Value (undefined when absent) so the JS
-            // orchestrator can do typeof-checks rather than us poking at the
-            // module namespace exotic object from Rust.
-            let before_val: Value = ns.get("before_transform")?;
-            let filter_val: Value = ns.get("try_filter")?;
-            let map_val: Value = ns.get("try_map")?;
-            let after_val: Value = ns.get("after_transform")?;
+                let js_input: Value = parse.call((json_str,))?;
 
-            let pipeline_fn: Function = ctx.eval(PIPELINE_JS.as_bytes())?;
-            let final_result: Value =
-                pipeline_fn.call((before_val, filter_val, map_val, after_val, js_input))?;
+                // Fetch each export as Value (undefined when absent) so the JS
+                // orchestrator can do typeof-checks rather than us poking at the
+                // module namespace exotic object from Rust.
+                let before_val: Value = ns.get("before_transform")?;
+                let filter_val: Value = ns.get("try_filter")?;
+                let map_val: Value = ns.get("try_map")?;
+                let after_val: Value = ns.get("after_transform")?;
 
-            stringify.call((final_result,))
-        })
-        .map_err(|e| anyhow::anyhow!("Script execution failed: {e}"))?;
+                let pipeline_fn: Function = ctx.eval(PIPELINE_JS.as_bytes())?;
+                let final_result: Value =
+                    pipeline_fn.call((before_val, filter_val, map_val, after_val, js_input))?;
+
+                stringify.call((final_result,))
+            };
+            run().map_err(|e| format_js_error(&ctx, e))
+        })?;
 
     serde_json::from_str(&result_str).context("Script returned a non-JSON-serialisable value")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn no_pipeline_fns_passes_through() {
-        let script = r#"export const placeholder = true;"#;
-        let input = json!({"name": "Alice", "age": 30});
-        let result = run_transform(&input.to_string(), script).unwrap();
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn after_transform_adds_field() {
-        let script = r#"export function after_transform(data) { return { ...data, ok: true }; }"#;
-        let result = run_transform(r#"{"x": 1}"#, script).unwrap();
-        assert_eq!(result["x"], 1);
-        assert_eq!(result["ok"], true);
-    }
-
-    #[test]
-    fn try_filter_removes_items() {
-        let script = r#"export function try_filter(item) { return item > 2; }"#;
-        let result = run_transform("[1, 2, 3, 4]", script).unwrap();
-        assert_eq!(result, json!([3, 4]));
-    }
-
-    #[test]
-    fn try_map_transforms_items() {
-        let script = r#"export function try_map(item) { return item * 2; }"#;
-        let result = run_transform("[1, 2, 3]", script).unwrap();
-        assert_eq!(result, json!([2, 4, 6]));
-    }
-
-    #[test]
-    fn before_transform_context_passed_to_filter_and_map() {
-        let script = r#"
-            export function before_transform() { return { threshold: 2, multiplier: 10 }; }
-            export function try_filter(item, ctx) { return item > ctx.threshold; }
-            export function try_map(item, ctx) { return item * ctx.multiplier; }
-        "#;
-        let result = run_transform("[1, 2, 3, 4]", script).unwrap();
-        assert_eq!(result, json!([30, 40]));
-    }
-
-    #[test]
-    fn full_pipeline_with_all_four_fns() {
-        let script = r#"
-            export function before_transform() { return { min: 1 }; }
-            export function try_filter(item, ctx) { return item.value > ctx.min; }
-            export function try_map(item) { return item.value; }
-            export function after_transform(items) { return { total: items.length, items }; }
-        "#;
-        let result = run_transform(
-            r#"[{"value": 1}, {"value": 2}, {"value": 3}]"#,
-            script,
-        )
-        .unwrap();
-        assert_eq!(result["total"], 2);
-        assert_eq!(result["items"], json!([2, 3]));
-    }
-
-    #[test]
-    fn try_map_applied_to_object_via_wrapping() {
-        let script = r#"export function try_map(item) { return { ...item, added: true }; }"#;
-        let input = json!({"key": "value"});
-        let result = run_transform(&input.to_string(), script).unwrap();
-        assert_eq!(result, json!({"key": "value", "added": true}));
-    }
-
-    #[test]
-    fn try_filter_false_on_object_returns_null() {
-        let script = r#"export function try_filter(_) { return false; }"#;
-        let input = json!({"key": "value"});
-        let result = run_transform(&input.to_string(), script).unwrap();
-        assert!(result.is_null());
-    }
-
-    #[test]
-    fn sample_script_matches_expected_shape() {
-        let json_str = std::fs::read_to_string("examples/sample.json").unwrap();
-        let script = std::fs::read_to_string("examples/sample.js").unwrap();
-        let result = run_transform(&json_str, &script).unwrap();
-        assert_eq!(result["version"], "1.0");
-        assert_eq!(result["total_users"], 2);
-        assert_eq!(result["admins"], json!(["Alice"]));
-        assert!(result["processed_at"].is_string());
-    }
-
-    #[test]
-    fn invalid_json_returns_error() {
-        let script = r#"export const x = 1;"#;
-        let err = run_transform("not json", script).unwrap_err();
-        assert!(err.to_string().contains("Invalid JSON"));
-    }
-
-    #[test]
-    fn after_transform_that_throws_returns_error() {
-        let script = r#"export function after_transform(_) { throw new Error("boom"); }"#;
-        let err = run_transform("{}", script).unwrap_err();
-        assert!(err.to_string().contains("Script execution failed"));
-    }
-
-    #[test]
-    fn before_transform_that_throws_returns_error() {
-        let script = r#"export function before_transform() { throw new Error("setup failed"); }"#;
-        let err = run_transform("[1, 2]", script).unwrap_err();
-        assert!(err.to_string().contains("Script execution failed"));
-    }
-
-    #[test]
-    fn try_filter_that_throws_returns_error() {
-        let script = r#"export function try_filter(_) { throw new Error("filter failed"); }"#;
-        let err = run_transform("[1, 2]", script).unwrap_err();
-        assert!(err.to_string().contains("Script execution failed"));
-    }
-
-    #[test]
-    fn try_map_that_throws_returns_error() {
-        let script = r#"export function try_map(_) { throw new Error("map failed"); }"#;
-        let err = run_transform("[1, 2]", script).unwrap_err();
-        assert!(err.to_string().contains("Script execution failed"));
-    }
-
-    #[test]
-    fn after_transform_returning_null_is_valid() {
-        let script = r#"export function after_transform(_) { return null; }"#;
-        let result = run_transform("{}", script).unwrap();
-        assert!(result.is_null());
-    }
-
-    #[test]
-    fn after_transform_returning_undefined_is_error() {
-        let script = r#"export function after_transform(_) { return undefined; }"#;
-        let err = run_transform("{}", script).unwrap_err();
-        assert!(
-            err.to_string().contains("Script execution failed")
-                || err.to_string().contains("non-JSON")
-        );
-    }
-}
+mod tests;
