@@ -86,6 +86,23 @@ cat examples/sample.json | ./target/release/rusty_map examples/sample.js
 ./target/release/rusty_map generate-template > my_transform.js
 ```
 
+### Installing with `cargo install`
+
+`cargo install` builds in release mode (optimized) but retains debug symbols by default. To produce a stripped binary, set `strip = true` in `Cargo.toml`:
+
+```toml
+[profile.release]
+strip = true
+```
+
+Then install:
+
+```sh
+cargo install --path .
+```
+
+The resulting binary in `~/.cargo/bin/` will be optimized and symbol-free.
+
 ## Key files
 
 | Path | Purpose |

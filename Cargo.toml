@@ -14,5 +14,8 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 reqwest = { version = "0.12", features = ["blocking"] }
 
+[profile.release]
+strip = true
+
 [dev-dependencies]
 httpmock = "0.7"
