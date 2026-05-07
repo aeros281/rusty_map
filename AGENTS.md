@@ -10,12 +10,17 @@ rusty_map -f <json_file> <script_file>
 
 # Pipe JSON via stdin
 cat data.json | rusty_map <script_file>
+
+# Print a starter script template to stdout
+rusty_map generate-template
 ```
 
 1. Reads JSON from `-f <json_file>` or from stdin when the flag is omitted.
 2. Loads `script_file` into an embedded QuickJS runtime ([rquickjs](https://github.com/DelSkayn/rquickjs)).
 3. Runs the script's pipeline exports against the parsed JSON.
 4. Pretty-prints the returned JSON to stdout.
+
+`generate-template` is a standalone subcommand — it prints a ready-to-edit JS file with `try_map` active and the other three hooks commented out.
 
 ## Script contract
 
@@ -76,6 +81,9 @@ cargo build --release
 
 # stdin pipe
 cat examples/sample.json | ./target/release/rusty_map examples/sample.js
+
+# scaffold a new script
+./target/release/rusty_map generate-template > my_transform.js
 ```
 
 ## Key files
@@ -87,6 +95,7 @@ cat examples/sample.json | ./target/release/rusty_map examples/sample.js
 | `examples/sample.json` | Sample input |
 | `examples/sample.js` | Sample transform script |
 | `docs/architecture.md` | Design decisions and extension points |
+| `docs/commit-conventions.md` | Commit message prefix conventions |
 
 ## Updating this file
 
