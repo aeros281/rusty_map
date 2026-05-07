@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use rquickjs::{Context as JsContext, Ctx, Exception, Function, Module, Object, Runtime, Value};
 
-// JS orchestrator: receives each optional pipeline fn (or undefined) + the parsed input.
+// JS orchestrator: parses JSON input, runs the pipeline, and returns pretty-printed JSON.
 // before_transform -> try_filter/try_map (per item, array only) -> after_transform.
-const PIPELINE_JS: &str = r#"(function(before, filter, map, after, input) {
+const PIPELINE_JS: &str = r#"(function(before, filter, map, after, jsonStr) {
+    var input;
+    try { input = JSON.parse(jsonStr); }
+    catch(e) { throw new Error("Invalid JSON input: " + e.message); }
     var transformCtx = (typeof before === 'function') ? before() : {};
     var processed = input;
     if (typeof filter === 'function' || typeof map === 'function') {
@@ -20,7 +23,10 @@ const PIPELINE_JS: &str = r#"(function(before, filter, map, after, input) {
             processed = processed.length > 0 ? processed[0] : null;
         }
     }
-    return (typeof after === 'function') ? after(processed) : processed;
+    var result = (typeof after === 'function') ? after(processed) : processed;
+    var out = JSON.stringify(result, null, 2);
+    if (typeof out === 'undefined') { throw new Error("Script returned a non-JSON-serialisable value"); }
+    return out;
 })"#;
 
 fn rb_read_file<'js>(ctx: Ctx<'js>, path: String) -> rquickjs::Result<String> {
@@ -96,8 +102,8 @@ fn format_js_error(ctx: &Ctx<'_>, e: rquickjs::Error) -> anyhow::Error {
         let caught = ctx.catch();
         if let Some(exc) = caught.as_exception() {
             let detail = exc
-                .stack()
-                .or_else(|| exc.message())
+                .message()
+                .or_else(|| exc.stack())
                 .unwrap_or_else(|| "unknown exception".into());
             return anyhow::anyhow!("Script execution failed: {}", detail);
         }
@@ -110,47 +116,32 @@ fn format_js_error(ctx: &Ctx<'_>, e: rquickjs::Error) -> anyhow::Error {
 
 /// Run `script` (an ES module) on `json_str` using the pipeline:
 /// `before_transform` → `try_filter` / `try_map` (per item) → `after_transform`.
-/// All four exports are optional.
-pub fn run_transform(json_str: &str, script: &str) -> Result<serde_json::Value> {
-    serde_json::from_str::<serde_json::Value>(json_str).context("Invalid JSON input")?;
-
+/// All four exports are optional. Returns pretty-printed JSON.
+pub fn run_transform(json_str: &str, script: &str) -> Result<String> {
     let rt = Runtime::new().context("Failed to create JS runtime")?;
     let ctx = JsContext::full(&rt).context("Failed to create JS context")?;
 
-    let result_str = ctx
-        .with(|ctx| -> Result<String> {
-            let run = || -> rquickjs::Result<String> {
-                register_bindings(&ctx)?;
+    ctx.with(|ctx| -> Result<String> {
+        let run = || -> rquickjs::Result<String> {
+            register_bindings(&ctx)?;
 
-                let module = Module::declare(ctx.clone(), "transform", script)?;
-                let (module, _promise) = module.eval()?;
-                let ns: Object = module.namespace()?;
+            let module = Module::declare(ctx.clone(), "transform", script)?;
+            let (module, _promise) = module.eval()?;
+            let ns: Object = module.namespace()?;
 
-                let globals = ctx.globals();
-                let json_obj: Object = globals.get("JSON")?;
-                let parse: Function = json_obj.get("parse")?;
-                let stringify: Function = json_obj.get("stringify")?;
+            // Fetch each export as Value (undefined when absent) so the JS
+            // orchestrator can do typeof-checks rather than us poking at the
+            // module namespace exotic object from Rust.
+            let before_val: Value = ns.get("before_transform")?;
+            let filter_val: Value = ns.get("try_filter")?;
+            let map_val: Value = ns.get("try_map")?;
+            let after_val: Value = ns.get("after_transform")?;
 
-                let js_input: Value = parse.call((json_str,))?;
-
-                // Fetch each export as Value (undefined when absent) so the JS
-                // orchestrator can do typeof-checks rather than us poking at the
-                // module namespace exotic object from Rust.
-                let before_val: Value = ns.get("before_transform")?;
-                let filter_val: Value = ns.get("try_filter")?;
-                let map_val: Value = ns.get("try_map")?;
-                let after_val: Value = ns.get("after_transform")?;
-
-                let pipeline_fn: Function = ctx.eval(PIPELINE_JS.as_bytes())?;
-                let final_result: Value =
-                    pipeline_fn.call((before_val, filter_val, map_val, after_val, js_input))?;
-
-                stringify.call((final_result,))
-            };
-            run().map_err(|e| format_js_error(&ctx, e))
-        })?;
-
-    serde_json::from_str(&result_str).context("Script returned a non-JSON-serialisable value")
+            let pipeline_fn: Function = ctx.eval(PIPELINE_JS.as_bytes())?;
+            pipeline_fn.call((before_val, filter_val, map_val, after_val, json_str))
+        };
+        run().map_err(|e| format_js_error(&ctx, e))
+    })
 }
 
 #[cfg(test)]

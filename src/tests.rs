@@ -3,18 +3,22 @@ use serde_json::json;
 
 use httpmock::prelude::*;
 
+fn transform(json: &str, script: &str) -> serde_json::Value {
+    serde_json::from_str(&run_transform(json, script).unwrap()).unwrap()
+}
+
 #[test]
 fn no_pipeline_fns_passes_through() {
     let script = r#"export const placeholder = true;"#;
     let input = json!({"name": "Alice", "age": 30});
-    let result = run_transform(&input.to_string(), script).unwrap();
+    let result = transform(&input.to_string(), script);
     assert_eq!(result, input);
 }
 
 #[test]
 fn after_transform_adds_field() {
     let script = r#"export function after_transform(data) { return { ...data, ok: true }; }"#;
-    let result = run_transform(r#"{"x": 1}"#, script).unwrap();
+    let result = transform(r#"{"x": 1}"#, script);
     assert_eq!(result["x"], 1);
     assert_eq!(result["ok"], true);
 }
@@ -22,14 +26,14 @@ fn after_transform_adds_field() {
 #[test]
 fn try_filter_removes_items() {
     let script = r#"export function try_filter(item) { return item > 2; }"#;
-    let result = run_transform("[1, 2, 3, 4]", script).unwrap();
+    let result = transform("[1, 2, 3, 4]", script);
     assert_eq!(result, json!([3, 4]));
 }
 
 #[test]
 fn try_map_transforms_items() {
     let script = r#"export function try_map(item) { return item * 2; }"#;
-    let result = run_transform("[1, 2, 3]", script).unwrap();
+    let result = transform("[1, 2, 3]", script);
     assert_eq!(result, json!([2, 4, 6]));
 }
 
@@ -40,7 +44,7 @@ fn before_transform_context_passed_to_filter_and_map() {
         export function try_filter(item, ctx) { return item > ctx.threshold; }
         export function try_map(item, ctx) { return item * ctx.multiplier; }
     "#;
-    let result = run_transform("[1, 2, 3, 4]", script).unwrap();
+    let result = transform("[1, 2, 3, 4]", script);
     assert_eq!(result, json!([30, 40]));
 }
 
@@ -52,11 +56,10 @@ fn full_pipeline_with_all_four_fns() {
         export function try_map(item) { return item.value; }
         export function after_transform(items) { return { total: items.length, items }; }
     "#;
-    let result = run_transform(
+    let result = transform(
         r#"[{"value": 1}, {"value": 2}, {"value": 3}]"#,
         script,
-    )
-    .unwrap();
+    );
     assert_eq!(result["total"], 2);
     assert_eq!(result["items"], json!([2, 3]));
 }
@@ -65,7 +68,7 @@ fn full_pipeline_with_all_four_fns() {
 fn try_map_applied_to_object_via_wrapping() {
     let script = r#"export function try_map(item) { return { ...item, added: true }; }"#;
     let input = json!({"key": "value"});
-    let result = run_transform(&input.to_string(), script).unwrap();
+    let result = transform(&input.to_string(), script);
     assert_eq!(result, json!({"key": "value", "added": true}));
 }
 
@@ -73,7 +76,7 @@ fn try_map_applied_to_object_via_wrapping() {
 fn try_filter_false_on_object_returns_null() {
     let script = r#"export function try_filter(_) { return false; }"#;
     let input = json!({"key": "value"});
-    let result = run_transform(&input.to_string(), script).unwrap();
+    let result = transform(&input.to_string(), script);
     assert!(result.is_null());
 }
 
@@ -81,7 +84,7 @@ fn try_filter_false_on_object_returns_null() {
 fn sample_script_matches_expected_shape() {
     let json_str = std::fs::read_to_string("examples/sample.json").unwrap();
     let script = std::fs::read_to_string("examples/sample.js").unwrap();
-    let result = run_transform(&json_str, &script).unwrap();
+    let result = transform(&json_str, &script);
     assert_eq!(result["version"], "1.0");
     assert_eq!(result["total_users"], 2);
     assert_eq!(result["admins"], json!(["Alice"]));
@@ -126,7 +129,7 @@ fn try_map_that_throws_returns_error() {
 #[test]
 fn after_transform_returning_null_is_valid() {
     let script = r#"export function after_transform(_) { return null; }"#;
-    let result = run_transform("{}", script).unwrap();
+    let result = transform("{}", script);
     assert!(result.is_null());
 }
 
@@ -150,7 +153,7 @@ fn rb_read_file_reads_existing_file() {
         r#"export function after_transform(_) {{ return rb_read_file("{}"); }}"#,
         path.display()
     );
-    let result = run_transform("{}", &script).unwrap();
+    let result = transform("{}", &script);
     assert_eq!(result, json!("hello world"));
     std::fs::remove_file(&path).ok();
 }
@@ -163,7 +166,7 @@ fn rb_read_file_missing_file_throws_js_error() {
             catch(e) { return "caught: " + e.message; }
         }
     "#;
-    let result = run_transform("{}", script).unwrap();
+    let result = transform("{}", script);
     assert!(result.as_str().unwrap().starts_with("caught:"));
 }
 
@@ -179,7 +182,7 @@ fn rb_read_file_result_usable_in_pipeline() {
         }}"#,
         path.display()
     );
-    let result = run_transform("{}", &script).unwrap();
+    let result = transform("{}", &script);
     assert_eq!(result, json!(42));
     std::fs::remove_file(&path).ok();
 }
@@ -197,7 +200,7 @@ fn rb_http_get_returns_response_body() {
         r#"export function after_transform(_) {{ return rb_http_get("{}", null, null); }}"#,
         server.url("/")
     );
-    let result = run_transform("{}", &script).unwrap();
+    let result = transform("{}", &script);
     assert_eq!(result, json!("pong"));
 }
 
@@ -217,7 +220,7 @@ fn rb_http_get_sends_custom_headers() {
         }}"#,
         server.url("/")
     );
-    let result = run_transform("{}", &script).unwrap();
+    let result = transform("{}", &script);
     assert_eq!(result, json!("authorized"));
 }
 
@@ -229,7 +232,7 @@ fn rb_http_get_invalid_url_throws_js_error() {
             catch(e) { return "caught"; }
         }
     "#;
-    let result = run_transform("{}", script).unwrap();
+    let result = transform("{}", script);
     assert_eq!(result, json!("caught"));
 }
 
@@ -255,7 +258,7 @@ fn rb_http_post_sends_body_and_returns_response() {
         }}"#,
         server.url("/")
     );
-    let result = run_transform("{}", &script).unwrap();
+    let result = transform("{}", &script);
     assert_eq!(result, json!("created"));
 }
 
@@ -270,7 +273,7 @@ fn rb_http_post_no_body_no_headers() {
         r#"export function after_transform(_) {{ return rb_http_post("{}", null, null); }}"#,
         server.url("/")
     );
-    let result = run_transform("{}", &script).unwrap();
+    let result = transform("{}", &script);
     assert_eq!(result, json!("bare"));
 }
 
@@ -287,7 +290,7 @@ fn rb_http_post_sends_auth_header() {
         }}"#,
         server.url("/")
     );
-    let result = run_transform("{}", &script).unwrap();
+    let result = transform("{}", &script);
     assert_eq!(result, json!("ok"));
 }
 
@@ -299,6 +302,6 @@ fn rb_http_post_invalid_url_throws_js_error() {
             catch(e) { return "caught"; }
         }
     "#;
-    let result = run_transform("{}", script).unwrap();
+    let result = transform("{}", script);
     assert_eq!(result, json!("caught"));
 }

@@ -72,6 +72,6 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to read script: {}", script_file.display()))?;
 
     let output = run_transform(&json_str, &script)?;
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    println!("{}", output);
     Ok(())
 }
